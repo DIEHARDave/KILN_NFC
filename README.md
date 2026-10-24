@@ -5,10 +5,12 @@ A [Kiln OS](https://github.com/djvalic/kiln-os) plugin for the
 spool to a reader, pick the IFS slot it goes in (or just insert the
 filament into an empty slot), and the slot gets the spool's material,
 exact color and nozzle temperature. If Spoolman is set up, the slot also
-gets its Spoolman spool.
+gets its Spoolman spool. Spoolman's printed **QR labels** work too, read
+with the printer's own camera.
 
 ```
 NFC tag ──► decode (Bambu, Creality, Snapmaker, OpenSpool, OpenPrintTag, ...)
+QR label ─► camera ──► decode (Spoolman label, OpenSpool JSON, text)
         ──► look up in Spoolman (spool ID from the tag, or the tag's UID)
         ──► prompt: [Slot 1] [Slot 2] [Slot 3] [Slot 4]  or insert filament
         ──► IFS_SET_MATERIAL: type, color, temperature
@@ -23,7 +25,8 @@ handling and prompt, writing into Kiln's own IFS slots instead of zMod's.
 > loads, and a CH340 "PN532 V2.0" board is found and talks to the plugin
 > through its user-space USB serial driver. Reading a tag into a slot on
 > Kiln has not been tried yet, nor CCID readers, CP210x boards or ESP32
-> bridges. The decoders, readers and Kiln integration have unit tests,
+> bridges. Camera QR scanning runs on the AD5X (about 1 s per frame) and
+> reads generated test codes; a printed label has not been tried yet. The decoders, readers and Kiln integration have unit tests,
 > which pass under Kiln's Python 3.14. Reports are very welcome.
 
 ## Readers
@@ -152,6 +155,38 @@ spool, and the spool becomes Moonraker's active spool whenever that slot
 loads. Without it, the spool is made active only when its slot is the one
 loaded at the time.
 
+## Spoolman QR labels
+
+[Spoolman](https://github.com/Donkie/Spoolman) prints a QR code label for
+each spool. KILN_NFC reads those labels with the printer's camera, so a
+spool with a Spoolman label can be loaded without an NFC reader or tag.
+
+Print **spool** labels from Spoolman's web UI. Both the compact code
+(`WEB+SPOOLMAN:S-15`, the default and easiest to read) and the link
+(`http://spoolman.local:7912/spool/show/15`) work. Filament labels
+(`WEB+SPOOLMAN:F-<id>`) name a filament, not a spool, so they don't set a
+slot. Each small square of the code needs about 2 to 3 camera pixels, so
+print it large enough for the distance you hold it at.
+
+1. Run `NFC_QR_SCAN`, or tap the **SCAN_QR_LABEL** macro in Mainsail,
+   Fluidd or HelixScreen.
+2. A prompt asks you to hold the label up to the camera. Hold it still,
+   facing the camera and well lit, until the slot prompt appears.
+3. Pick a slot, or insert the filament into an empty one, as with a tag.
+
+The scan keeps looking for up to 20 seconds (`qr_scan_time`, or
+`NFC_QR_SCAN TIME=<s>`). If it finds nothing, the prompt says so and
+offers **Try again**. `NFC_QR_CANCEL` stops it.
+
+Frames are decoded with the Pillow library that Kiln ships, in a separate
+low-priority process. On an AD5X with Kiln's 1280x720 camera that takes
+about 1 s per frame. The last scan's frames are kept in `/tmp/kiln_nfc_qr`
+to see why a label wasn't read. Other QR codes work too: OpenSpool JSON
+and plain text such as `PLA:FF0000`.
+
+A label has no UID of its own, so `bind_card_uid` doesn't apply, and the
+spool must exist in Spoolman.
+
 ## Network readers
 
 KILN_NFC answers network readers through Moonraker, as zmod_nfc does,
@@ -160,11 +195,6 @@ under `kiln_nfc/scan`, `kiln_nfc/assign`, `kiln_nfc/cancel` and
 ([docs/remote-api.md](docs/remote-api.md)). LaneTag's "zmod_nfc" method
 still uses the zmod_nfc names, so it needs an update before it can send
 to KILN_NFC.
-
-## Not ported (yet)
-
-- **Camera QR labels** (zmod_nfc's `NFC_QR_SCAN`): Kiln has no ffmpeg or
-  libturbojpeg to decode the camera's JPEGs.
 
 ## Commands
 
@@ -178,10 +208,12 @@ to KILN_NFC.
 | `NFC_DUMP [RAW=1]` | Everything read from the last tag; `RAW=1` adds a memory dump. |
 | `NFC_RESCAN` | Read the tag on the reader again. |
 | `NFC_TEST_SCAN TEXT=PLA:FF0000` / `SPOOL=<id>` / `UID=<hex>` | Simulate a scan, to try the prompt and Spoolman flow without a reader. |
+| `NFC_QR_SCAN [TIME=<s>]` | Look for a QR label with the camera (the SCAN_QR_LABEL macro runs this). |
+| `NFC_QR_CANCEL` | Stop looking for a QR label. |
 | `NFC_ENABLE` / `NFC_DISABLE` | Resume or ignore scans. |
 
 `printer.kiln_nfc` reports `state`, `reader`, `error`, `pending`,
-`remote` and the `last` scan (UID, format, material, color, spool ID).
+`qr_scanning`, `remote` and the `last` scan (UID, format, material, color, spool ID).
 
 ## Testing a reader without Klipper
 

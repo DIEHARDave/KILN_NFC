@@ -11,6 +11,10 @@ whenever that slot loads. Inserting the filament into a free slot while
 the prompt is open picks that slot, which also works with screens that
 cannot show prompts.
 
+NFC_QR_SCAN reads a QR label (Spoolman, OpenSpool JSON, text) through the
+printer camera instead. The camera module does that in a child process;
+its text then takes the same path as a tag's.
+
 Network readers (LaneTag) send their raw tag reads to webhooks
 endpoints that Moonraker publishes (kiln_nfc/scan, ...; remote.py); those
 take the same path too.
@@ -20,9 +24,12 @@ after an assignment the slot's record is written once more (lane_data.py)
 so HelixScreen takes the scanned spool over a color picked on its screen,
 and OrcaSlicer gets the spool's name, vendor and Spoolman ID."""
 
+import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 
@@ -32,14 +39,19 @@ from .decoders import vendors
 from .readers.base import ReaderError
 from .readers.detect import READER_TYPES, open_reader
 from .spoolman import Spoolman, SpoolmanError, normalize_uid, spool_color, spool_title, spool_uids
+from .camera import DECODERS as QR_DECODERS, DEFAULT_URL, DEFAULT_WIDTH
 from .decoders.ndef import text_message, type2_image
 from .lane_data import LaneData
 from .remote import API_VERSION, RemoteError, tag_from_json
-from .tag import KIND_QR, KIND_TYPE2, TECH_ISO14443A, Tag, normalize_color
+from .tag import KIND_QR, KIND_TYPE2, TECH_CAMERA, TECH_ISO14443A, Tag, normalize_color
 
 LOGGER = logging.getLogger("kiln_nfc")
 # The plugin's clone (python/kilnnfc/ is two levels down).
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The directory holding the kilnnfc package, for the camera child process.
+PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The last camera scan's frames, to see why a label was not read.
+QR_FRAMES_DIR = "/tmp/kiln_nfc_qr"
 
 # The root hook install.sh puts in place (root/nfc-hook.sh); keep in step
 # with its NFC_HOOK_VERSION.
@@ -193,6 +205,11 @@ class KilnNfc(object):
         self.bind_card_uid = config.getboolean("bind_card_uid", True)
         self.match_filament = config.getboolean("spoolman_match_filament", True)
         self.set_temp = config.getboolean("set_temperature", True)
+        self.qr_url = config.get("qr_snapshot_url", DEFAULT_URL)
+        self.qr_decoder = config.getchoice("qr_decoder", {d: d for d in QR_DECODERS}, "auto")
+        self.qr_ffmpeg = config.get("qr_ffmpeg", "")
+        self.qr_scan_time = config.getfloat("qr_scan_time", 20., minval=1., maxval=120.)
+        self.qr_width = config.getint("qr_width", DEFAULT_WIDTH, minval=320, maxval=4096)
         self.disabled_formats = [f.strip() for f in config.get("disabled_formats", "").split(",")
                                  if f.strip()]
         moonraker_url = config.get("moonraker_url", "http://127.0.0.1:7125")
@@ -222,6 +239,8 @@ class KilnNfc(object):
         self._thread = None
         self._stop = threading.Event()
         self._rescan = threading.Event()
+        self._qr_process = None      # camera child process while scanning
+        self._qr_prompt = False      # the "hold the label up" prompt is shown
 
         for cmd, desc in (
                 ("NFC_STATUS", "Show the NFC reader state and the last scanned tag"),
@@ -233,6 +252,8 @@ class KilnNfc(object):
                 ("NFC_RESCAN", "Read the tag on the reader again"),
                 ("NFC_TEST_SCAN", "Simulate a scan without a reader: TEXT=PLA:FF0000, "
                                   "SPOOL=<id> or UID=<hex>"),
+                ("NFC_QR_SCAN", "Read a spool's QR label with the printer camera [TIME=<s>]"),
+                ("NFC_QR_CANCEL", "Stop looking for a QR label"),
                 ("NFC_ENABLE", "Resume handling scanned tags"),
                 ("NFC_DISABLE", "Ignore scanned tags until NFC_ENABLE")):
             self.gcode.register_command(cmd, getattr(self, "cmd_" + cmd), desc=desc)
@@ -292,6 +313,7 @@ class KilnNfc(object):
         # thread must release the reader first.
         self._stop.set()
         self._rescan.set()
+        self._kill_qr()
         if self._thread is not None:
             self._thread.join(3.)
             self._thread = None
@@ -506,6 +528,7 @@ class KilnNfc(object):
             details.append(scan.spoolman_note)
         if scan.filament is not None:
             details.append(scan.filament.fmt + (" QR code" if scan.is_qr else " tag"))
+        self._qr_prompt = False      # this prompt replaces the camera one
         self._prompt("prompt_text %s" % clean(" - ".join(details)))
         hint = "Choose the IFS slot"
         if self.assign_on_insert and slots["presence"]:
@@ -738,6 +761,8 @@ class KilnNfc(object):
             lines.append("Last scan (%s), %ds ago: %s" % (self.last.source(), age, self.last.title()))
         if self.pending is not None:
             lines.append("Waiting for a slot for %s" % self.pending.title())
+        if self._qr_process is not None:
+            lines.append("Looking for a QR label with the camera")
         lines.append("Formats: " + ", ".join(
             name for name in decoders.FORMAT_NAMES if name not in self.disabled_formats))
         keys = ["%s (%s)" % (k.split("_")[0].title(), "config" if k in self.settings else "built in")
@@ -795,6 +820,110 @@ class KilnNfc(object):
                   sak=0x00, reader="NFC_TEST_SCAN")
         scan = self._wait_background(self._process, tag)
         self._handle_scan(scan, self.gcode.run_script_from_command)
+
+    # Camera QR labels ----------------------------------------------------
+
+    def cmd_NFC_QR_SCAN(self, gcmd):
+        if self._qr_process is not None:
+            raise gcmd.error("NFC: already looking for a QR label")
+        if self._printing() and not self.scan_while_printing:
+            raise gcmd.error("NFC: QR scanning is off while printing (scan_while_printing)")
+        seconds = gcmd.get_float("TIME", self.qr_scan_time, minval=1., maxval=120.)
+        command = [sys.executable, "-m", "kilnnfc.camera", "--url", self.qr_url,
+                   "--time", "%g" % seconds, "--width", str(self.qr_width), "--nice", "19",
+                   "--verbose", "--save-dir", QR_FRAMES_DIR,
+                   "--decoder", self.qr_decoder]
+        if self.qr_ffmpeg:
+            command += ["--ffmpeg", self.qr_ffmpeg]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (PACKAGE_DIR, env.get("PYTHONPATH")) if p)
+        try:
+            process = subprocess.Popen(command, cwd=PACKAGE_DIR, env=env,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise gcmd.error("NFC: could not start the camera scan: %s" % exc)
+        self._qr_process = process
+        self._prompt("prompt_begin NFC: QR label")
+        self._prompt("prompt_text Hold the spool's QR label up to the camera (%d s)" % seconds)
+        self._prompt("prompt_footer_button Cancel|NFC_QR_CANCEL|error")
+        self._prompt("prompt_show")
+        self._qr_prompt = True
+        gcmd.respond_info("NFC: looking for a QR label for %d s" % seconds)
+        thread = threading.Thread(target=self._qr_wait, args=(process, seconds),
+                                  name="kiln_nfc camera")
+        thread.daemon = True
+        thread.start()
+
+    def _qr_wait(self, process, seconds):
+        """Wait for the camera process, then decode and look up its text
+        like a tag (worker thread)."""
+        try:
+            out, err = process.communicate(timeout=seconds + 60.)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out, err = process.communicate()
+        result = {}
+        for line in reversed(out.decode("utf-8", "replace").splitlines()):
+            try:
+                result = json.loads(line)
+                break
+            except ValueError:
+                continue
+        for line in err.decode("utf-8", "replace").splitlines():
+            if line.startswith(("frame ", "decoder: ")):
+                LOGGER.info("kiln_nfc: camera %s", line)
+        if not result:
+            message = err.decode("utf-8", "replace").strip().splitlines()
+            LOGGER.warning("kiln_nfc: camera scan failed: %s", err.decode("utf-8", "replace"))
+            result = {"error": "camera scan failed%s" % (": " + message[-1] if message else "")}
+        scan = None
+        if "text" in result:
+            tag = Tag(b"", TECH_CAMERA, KIND_QR, result["text"].encode("utf-8"), reader="camera")
+            scan = self._process(tag)
+        self._post(self._qr_done, process, scan, result.get("error"))
+
+    def _qr_done(self, process, scan, error):
+        if process is not self._qr_process:
+            return                   # cancelled
+        self._qr_process = None
+        if self._qr_prompt:
+            self._prompt("prompt_end")
+            self._qr_prompt = False
+        if scan is not None:
+            self._handle_scan(scan)
+            return
+        self.gcode.respond_info("NFC: %s" % error)
+        # Say so on the screen too, where the scan was started.
+        self._prompt("prompt_begin NFC: QR label")
+        self._prompt("prompt_text %s" % (error[:1].upper() + error[1:]).replace("|", "/"))
+        self._prompt("prompt_text Hold the label still, close to the camera and well lit")
+        self._prompt("prompt_footer_button Try again|NFC_QR_SCAN|primary")
+        self._prompt("prompt_footer_button Close|NFC_QR_CANCEL|secondary")
+        self._prompt("prompt_show")
+        self._qr_prompt = True
+
+    def _kill_qr(self):
+        process, self._qr_process = self._qr_process, None
+        if process is not None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def cmd_NFC_QR_CANCEL(self, gcmd):
+        if self._qr_process is None:
+            if self._qr_prompt:          # the "nothing found" prompt
+                self._prompt("prompt_end")
+                self._qr_prompt = False
+            else:
+                gcmd.respond_info("NFC: not looking for a QR label")
+            return
+        self._kill_qr()
+        if self._qr_prompt:
+            self._prompt("prompt_end")
+            self._qr_prompt = False
+        gcmd.respond_info("NFC: stopped looking for a QR label")
 
     def cmd_NFC_ENABLE(self, gcmd):
         self.enabled = True
@@ -906,6 +1035,7 @@ class KilnNfc(object):
             "state": self.reader_state,
             "error": self.reader_error,
             "pending": self.pending is not None,
+            "qr_scanning": self._qr_process is not None,
             "last": self.last.summary() if self.last is not None else None,
         }
 

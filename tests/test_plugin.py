@@ -1,7 +1,9 @@
 """The Klipper module against a minimal fake Klipper."""
 
+import json
 import os
 import tempfile
+import threading
 import unittest
 
 from helpers import text_record, type2_tag
@@ -476,6 +478,144 @@ class HookTest(unittest.TestCase):
         with open(os.path.join(root, "root", "nfc-hook.sh")) as handle:
             text = handle.read()
         self.assertIn("NFC_HOOK_VERSION=%d\n" % klipper_plugin.HOOK_VERSION, text)
+
+
+class FakeProcess(object):
+    def __init__(self, output, error=b""):
+        self.output = output
+        self.error = error
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        return self.output, self.error
+
+    def kill(self):
+        self.killed = True
+
+
+class QrScanTest(unittest.TestCase):
+    def camera_result(self, plugin, result, error=b""):
+        process = FakeProcess(json.dumps(result).encode() + b"\n", error)
+        plugin._qr_process = process
+        plugin._qr_prompt = True
+        plugin._qr_wait(process, 5)
+        return process
+
+    def spoolman(self, plugin, objects):
+        objects["webhooks"]._remote_methods["spoolman_set_active_spool"] = True
+        calls = []
+
+        class FakeSpoolman(object):
+            def get_spool(self, spool_id):
+                calls.append(("get", spool_id))
+                return {"id": spool_id, "filament": {"material": "PETG", "color_hex": "445566",
+                                                     "name": "Blue"}, "extra": {}}
+
+            def find_spool_by_uid(self, uid):
+                calls.append(("uid", uid))
+                return None
+
+        plugin.spoolman = FakeSpoolman()
+        return calls
+
+    def test_spoolman_label(self):
+        plugin, gcode, objects = make_plugin(spoolman_slots=True)
+        calls = self.spoolman(plugin, objects)
+        self.camera_result(plugin, {"text": "web+spoolman:s-12", "frames": 2})
+        self.assertEqual(calls, [("get", 12)])   # no UID lookup for a QR code
+        self.assertIsNone(plugin._qr_process)
+        self.assertIn("// action:prompt_end", gcode.raw)
+        self.assertTrue(gcode.raw[-1] == "// action:prompt_show" and plugin.pending is not None)
+        self.assertTrue(any("Spoolman spool 12" in r and "Spoolman QR code" in r for r in gcode.raw))
+        gcode.commands["NFC_ASSIGN"](FakeGcmd(gcode, SLOT=2))
+        self.assertTrue(gcode.in_command[0].startswith(
+            "IFS_SET_MATERIAL SLOT=2 TYPE=PETG COLOR=445566"), gcode.in_command)
+        self.assertEqual(gcode.in_command[-1], "SPOOLMAN_SET_SLOT SLOT=2 SPOOL=12")
+
+    def test_text_label_without_spoolman(self):
+        plugin, gcode, _ = make_plugin()
+        self.camera_result(plugin, {"text": "PLA:FF8800"})
+        gcode.commands["NFC_ASSIGN"](FakeGcmd(gcode, SLOT=3))
+        self.assertTrue(gcode.in_command[0].startswith("IFS_SET_MATERIAL SLOT=3 TYPE=PLA COLOR=FF8800"),
+                        gcode.in_command)
+        gcode.commands["NFC_DUMP"](FakeGcmd(gcode))
+        self.assertIn("QR text: PLA:FF8800", gcode.info[-1])
+
+    def test_nothing_found(self):
+        plugin, gcode, _ = make_plugin()
+        self.camera_result(plugin, {"error": "no QR code found", "frames": 9})
+        self.assertEqual(gcode.info[-1], "NFC: no QR code found")
+        self.assertIsNone(plugin.pending)
+        # The screen says so too, with a retry.
+        self.assertIn("// action:prompt_text No QR code found", gcode.raw)
+        self.assertIn("// action:prompt_footer_button Try again|NFC_QR_SCAN|primary", gcode.raw)
+        self.assertEqual(gcode.raw[-1], "// action:prompt_show")
+        gcode.commands["NFC_QR_CANCEL"](FakeGcmd(gcode))
+        self.assertEqual(gcode.raw[-1], "// action:prompt_end")
+        self.assertFalse(plugin._qr_prompt)
+
+    def test_camera_process_crash(self):
+        plugin, gcode, _ = make_plugin()
+        process = FakeProcess(b"", b"Traceback ...\nImportError: boom\n")
+        plugin._qr_process = process
+        plugin._qr_wait(process, 5)
+        self.assertEqual(gcode.info[-1], "NFC: camera scan failed: ImportError: boom")
+
+    def test_cancel(self):
+        plugin, gcode, _ = make_plugin()
+        process = FakeProcess(json.dumps({"text": "PLA:FF8800"}).encode())
+        plugin._qr_process = process
+        plugin._qr_prompt = True
+        gcode.commands["NFC_QR_CANCEL"](FakeGcmd(gcode))
+        self.assertTrue(process.killed)
+        plugin._qr_wait(process, 5)              # the killed process still reports
+        self.assertIsNone(plugin.pending)
+        self.assertEqual(gcode.info[-1], "NFC: stopped looking for a QR label")
+
+    def test_scan_command(self):
+        plugin, gcode, _ = make_plugin({"qr_ffmpeg": "/opt/ffmpeg"})
+        started = []
+        release = threading.Event()
+
+        class RunningProcess(FakeProcess):
+            def communicate(self, timeout=None):
+                release.wait(5)
+                return self.output, self.error
+
+        def popen(command, **kw):
+            started.append((command, kw))
+            return RunningProcess(b'{"error": "no QR code found"}')
+
+        original = klipper_plugin.subprocess.Popen
+        klipper_plugin.subprocess.Popen = popen
+        try:
+            gcode.commands["NFC_QR_SCAN"](FakeGcmd(gcode, TIME=8))
+        finally:
+            klipper_plugin.subprocess.Popen = original
+        command, kw = started[0]
+        self.assertEqual(command[1:3], ["-m", "kilnnfc.camera"])
+        self.assertIn("/opt/ffmpeg", command)
+        self.assertEqual(command[command.index("--url") + 1],
+                         "http://127.0.0.1:8090/?action=snapshot")
+        self.assertEqual(command[command.index("--time") + 1], "8")
+        self.assertEqual(kw["cwd"], klipper_plugin.PACKAGE_DIR)
+        self.assertTrue(os.path.isdir(os.path.join(kw["cwd"], "kilnnfc")))
+        self.assertTrue(kw["env"]["PYTHONPATH"].startswith(klipper_plugin.PACKAGE_DIR))
+        self.assertIn("NFC_QR_CANCEL", "".join(gcode.raw))
+        with self.assertRaises(CommandError):
+            gcode.commands["NFC_QR_SCAN"](FakeGcmd(gcode))   # still running
+        release.set()
+
+    def test_not_while_printing(self):
+        plugin, gcode, objects = make_plugin()
+
+        class Stats(object):
+            def get_status(self, eventtime):
+                return {"state": "printing"}
+
+        objects["print_stats"] = Stats()
+        with self.assertRaises(CommandError):
+            gcode.commands["NFC_QR_SCAN"](FakeGcmd(gcode))
 
 
 if __name__ == "__main__":
