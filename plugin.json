@@ -1,0 +1,10 @@
+{
+  "name": "nfc",
+  "description": "NFC/RFID filament tags: scan a spool, pick the IFS slot, and its material, color and Spoolman spool are set",
+  "version": "0.1.0",
+  "author": "DIEHARDave",
+  "url": "https://github.com/DIEHARDave/KILN_NFC",
+  "requires_os": "1.3",
+  "requires": [],
+  "conflicts": []
+}
