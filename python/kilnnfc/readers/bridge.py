@@ -49,7 +49,11 @@ class SerialBridge(object):
         try:
             self.port.open()
             reply = self._call(self.CMD_HELLO, b"", timeout=0.5)
-        except (SerialError, BridgeError) as exc:
+        except SerialError as exc:
+            # Serial errors already name the port.
+            self.port.close()
+            raise NoBridgeError(str(exc))
+        except BridgeError as exc:
             self.port.close()
             raise NoBridgeError("%s: %s" % (self.path, exc))
         if not reply.startswith(self.MAGIC):
