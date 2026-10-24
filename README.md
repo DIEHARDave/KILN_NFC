@@ -19,10 +19,12 @@ It is a port of [zmod_nfc](https://github.com/DIEHARDave/zmod_nfc) (the
 same plugin for zMod) to Kiln OS: the same readers, tag formats, Spoolman
 handling and prompt, writing into Kiln's own IFS slots instead of zMod's.
 
-> **Status: untested on the printer.** The decoders, readers and Kiln
-> integration have unit tests, which pass under Kiln's Python 3.14 on an
-> AD5X. The plugin has not yet been enabled on a printer, and no reader has
-> been plugged into one running Kiln. Reports are very welcome.
+> **Status: early.** Running on an AD5X with Kiln OS 2026.02.3: the plugin
+> loads, and a CH340 "PN532 V2.0" board is found and talks to the plugin
+> through its user-space USB serial driver. Reading a tag into a slot on
+> Kiln has not been tried yet, nor CCID readers, CP210x boards or ESP32
+> bridges. The decoders, readers and Kiln integration have unit tests,
+> which pass under Kiln's Python 3.14. Reports are very welcome.
 
 ## Readers
 
