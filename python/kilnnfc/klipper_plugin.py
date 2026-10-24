@@ -15,8 +15,10 @@ Network readers (LaneTag) send their raw tag reads to webhooks
 endpoints that Moonraker publishes (kiln_nfc/scan, ...; remote.py); those
 take the same path too.
 
-Kiln's own kiln_lanes Moonraker component mirrors the slots into
-lane_data (for OrcaSlicer), so nothing here writes it."""
+Kiln's kiln_lanes Moonraker component mirrors the slots into lane_data;
+after an assignment the slot's record is written once more (lane_data.py)
+so HelixScreen takes the scanned spool over a color picked on its screen,
+and OrcaSlicer gets the spool's name, vendor and Spoolman ID."""
 
 import logging
 import os
@@ -31,6 +33,7 @@ from .readers.base import ReaderError
 from .readers.detect import READER_TYPES, open_reader
 from .spoolman import Spoolman, SpoolmanError, normalize_uid, spool_color, spool_title, spool_uids
 from .decoders.ndef import text_message, type2_image
+from .lane_data import LaneData
 from .remote import API_VERSION, RemoteError, tag_from_json
 from .tag import KIND_QR, KIND_TYPE2, TECH_ISO14443A, Tag, normalize_color
 
@@ -194,6 +197,7 @@ class KilnNfc(object):
                                  if f.strip()]
         moonraker_url = config.get("moonraker_url", "http://127.0.0.1:7125")
         self.spoolman = Spoolman(moonraker_url)
+        self.lane_data = LaneData(moonraker_url) if config.getboolean("lane_data", True) else None
         self.remote_result = None     # outcome of the last network scan
         self.settings = self._vendor_settings(config)
         self.excluded_ports = []
@@ -616,6 +620,8 @@ class KilnNfc(object):
             if temp:
                 cmd += " TEMP=%d" % temp
             run_gcode(cmd)
+            self._write_lane_data(scan, slot_number, material or current["material"],
+                                  color or current["color"], temp)
         if spool is None:
             what = (material or current["material"] or "?") + (" #" + color if color else "")
             respond("NFC: %s is now %s" % (label, what))
@@ -632,6 +638,21 @@ class KilnNfc(object):
         if self.spoolman_slots is None:
             respond("NFC: turn on Kiln's spoolman plugin (INSTALL_PLUGIN NAME=spoolman"
                     " ENABLE=1) to keep each slot's spool")
+
+    def _write_lane_data(self, scan, slot_number, material, color, temp):
+        if self.lane_data is None:
+            return
+        info = {"material": material, "color": color, "nozzle_temp": temp,
+                "name": scan.title(), "uid": scan.uid if scan.tag.uid else ""}
+        if scan.spool is not None:
+            filament = scan.spool.get("filament") or {}
+            info["spool_id"] = scan.spool["id"]
+            info["vendor"] = (filament.get("vendor") or {}).get("name")
+            info["bed_temp"] = filament.get("settings_bed_temp")
+        if scan.filament is not None:
+            info["vendor"] = info.get("vendor") or scan.filament.brand
+            info["bed_temp"] = info.get("bed_temp") or scan.filament.bed_temp
+        self.lane_data.write_later(slot_number, info)
 
     def _set_active_spool(self, spool_id):
         try:

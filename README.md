@@ -127,6 +127,12 @@ Klipper merges both `[kiln_nfc]` sections, and yours win.
    Kiln's `IFS_SET_MATERIAL`, so HelixScreen, auto-refill and OrcaSlicer
    (through Kiln's lane data) see it.
 
+After the slot is set, KILN_NFC also writes the slot's lane data record
+(spool name, vendor, Spoolman ID, temperatures). Kiln's own record for the
+slot uses a key that HelixScreen mistakes for one of its own, so without
+this HelixScreen ignores the change and keeps showing a color you once
+picked on its screen (`lane_data: False` turns it off).
+
 Kiln takes any material name, so the tag's material is kept as it is
 (ASA stays ASA, `PLA Silk` becomes `PLA-SILK`). The color is the exact
 color from the tag or Spoolman; there is no palette to snap to.
@@ -159,9 +165,6 @@ to KILN_NFC.
 
 - **Camera QR labels** (zmod_nfc's `NFC_QR_SCAN`): Kiln has no ffmpeg or
   libturbojpeg to decode the camera's JPEGs.
-- **Writing lane data**: Kiln's own `kiln_lanes` Moonraker component
-  mirrors the IFS slots into lane data for OrcaSlicer, so KILN_NFC leaves
-  it alone. That data has no Spoolman spool ID or vendor yet.
 
 ## Commands
 

@@ -187,7 +187,9 @@ def make_plugin(options=None, spoolman_slots=False, slots=4):
     if spoolman_slots:
         objects["spoolman_slots"] = object()
     printer = FakePrinter(objects)
-    plugin = klipper_plugin.KilnNfc(FakeConfig(printer, options or {}))
+    # No lane_data writes to a Moonraker that is not there.
+    options = dict({"lane_data": False}, **(options or {}))
+    plugin = klipper_plugin.KilnNfc(FakeConfig(printer, options))
     plugin.ifs = objects["ifs"]
     plugin.ifs_materials = objects["ifs_materials"]
     plugin.spoolman_slots = objects.get("spoolman_slots")
@@ -295,6 +297,23 @@ class PluginTest(unittest.TestCase):
         plugin._handle_scan(scan)
         gcode.commands["NFC_ASSIGN"](FakeGcmd(gcode, SLOT=3))
         self.assertEqual(objects["webhooks"].calls, [])
+
+    def test_lane_data_written_after_the_slot(self):
+        plugin, gcode, _ = make_plugin({"lane_data": True})
+        written = []
+        plugin.lane_data.write_later = lambda slot, info: written.append((slot, info))
+        scan = plugin._process(type2_tag(text_record("PLA:112233")))
+        scan.spool = {"id": 5, "extra": {"card_uids": '"%s"' % scan.uid},
+                      "filament": {"material": "PLA", "color_hex": "112233",
+                                   "vendor": {"name": "Sunlu"}, "settings_extruder_temp": 215,
+                                   "settings_bed_temp": 60}}
+        plugin._handle_scan(scan)
+        gcode.commands["NFC_ASSIGN"](FakeGcmd(gcode, SLOT=3))
+        slot, info = written[0]
+        self.assertEqual(slot, 3)
+        self.assertEqual((info["material"], info["color"], info["nozzle_temp"], info["bed_temp"],
+                          info["spool_id"], info["vendor"]),
+                         ("PLA", "112233", 215, 60, 5, "Sunlu"))
 
     def test_material_names(self):
         self.assertEqual(klipper_plugin.kiln_material("asa"), "ASA")
