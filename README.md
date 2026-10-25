@@ -8,15 +8,15 @@ exact color and nozzle temperature. If Spoolman is set up, the slot also
 gets its Spoolman spool. Spoolman's printed **QR labels** work too, read
 with the printer's own camera.
 
-> **Kiln OS v0.0.25 and newer: may not work properly.** This plugin
-> needs a root boot hook. Kiln OS has no proper one, so `install.sh`
-> adds a line to `/data/ad5x/camera.conf`, which Kiln's camera service
-> used to run as a shell script at boot. Since v0.0.25 Kiln reads that
-> file as settings only, so the hook no longer runs at boot. USB readers
-> stay root-only, so the plugin can't open them. Workaround until Kiln
-> offers a boot hook: after each reboot, run `sh /data/ad5x/nfc-hook.sh`
-> as root. A proper hook was requested in
-> [djvalic/kiln-os#13](https://github.com/djvalic/kiln-os/issues/13).
+> **The USB hook is a stopgap.** USB readers need a root boot hook, and
+> Kiln OS has none for plugins. `camera.conf`, used before, has been read
+> as settings only since Kiln v0.0.24, so `install.sh` now uses
+> `/data/ad5x/screen.conf`, which Kiln's screen service still runs as a
+> shell script at boot. A later Kiln release may close that too; then run
+> `sh /data/ad5x/nfc-hook.sh` as root after each reboot. A proper hook was
+> requested in [djvalic/kiln-os#13](https://github.com/djvalic/kiln-os/issues/13).
+> Installed before this change? `NFC_STATUS` says the hook is outdated:
+> run `install.sh` again (it moves the line out of `camera.conf`).
 
 ```
 NFC tag ──► decode (Bambu, Creality, Snapmaker, OpenSpool, OpenPrintTag, ...)
@@ -100,10 +100,9 @@ the reader once it is found, and says what is missing if it isn't.
 **The root hook** (`install.sh`) is only needed for USB readers. Kiln's
 `/dev/bus/usb` nodes belong to root, and a plugin runs as user `klipper`.
 `install.sh` copies `root/nfc-hook.sh` to `/data/ad5x/nfc-hook.sh` and
-adds a line to `/data/ad5x/camera.conf`, which Kiln's camera service
-sources as root at every boot (KILN_Camera and KILN_Mainsail use the
-same file). The hook runs a small watcher that, whenever USB devices
-come or go, gives group `klipper` access to devices that can be readers:
+adds a line to `/data/ad5x/screen.conf`, which Kiln's screen service
+sources as root at every boot (see the note at the top). The hook runs
+a small watcher that, whenever USB devices come or go, gives group `klipper` access to devices that can be readers:
 CCID-class devices and USB serial chips from the vendors above. Nothing
 else is changed. `uninstall.sh` removes it.
 

@@ -9,8 +9,10 @@
 #
 # install.sh copies this to /data/ad5x/nfc-hook.sh (root) and adds
 #   . /data/ad5x/nfc-hook.sh
-# to /data/ad5x/camera.conf, which Kiln's /etc/init.d/S64ad5x-camera
-# (root) sources at every boot. When sourced, this hook starts the
+# to /data/ad5x/screen.conf, which Kiln's /etc/init.d/S65ad5x-screen
+# (root) sources at every boot (a stopgap: Kiln has no plugin boot hook,
+# and camera.conf, used up to version 1, is no longer run). When
+# sourced, this hook starts the
 # watcher once (pid in /run, so once per boot). The watcher
 # ("nfc-hook.sh watch") gives group klipper read/write on the nodes of
 # USB devices that can be NFC readers - CCID class (ACR122U, ACR1552U),
@@ -20,7 +22,7 @@
 
 # Bump when this file changes: the plugin's NFC_STATUS compares it with
 # the installed copy and asks for install.sh again
-NFC_HOOK_VERSION=1
+NFC_HOOK_VERSION=2
 
 NFC_HOOK=/data/ad5x/nfc-hook.sh
 NFC_WATCH_PID=/run/kiln-nfc-usb.pid

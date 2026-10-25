@@ -56,7 +56,7 @@ QR_FRAMES_DIR = "/tmp/kiln_nfc_qr"
 # The root hook install.sh puts in place (root/nfc-hook.sh); keep in step
 # with its NFC_HOOK_VERSION.
 HOOK_PATH = "/data/ad5x/nfc-hook.sh"
-HOOK_VERSION = 1
+HOOK_VERSION = 2
 
 SPOOLMAN_REMOTE_METHOD = "spoolman_set_active_spool"
 SLOTS_PER_IFS = 4
