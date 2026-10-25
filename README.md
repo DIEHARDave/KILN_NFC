@@ -8,6 +8,16 @@ exact color and nozzle temperature. If Spoolman is set up, the slot also
 gets its Spoolman spool. Spoolman's printed **QR labels** work too, read
 with the printer's own camera.
 
+> **Kiln OS v0.0.25 and newer: may not work properly.** This plugin
+> needs a root boot hook. Kiln OS has no proper one, so `install.sh`
+> adds a line to `/data/ad5x/camera.conf`, which Kiln's camera service
+> used to run as a shell script at boot. Since v0.0.25 Kiln reads that
+> file as settings only, so the hook no longer runs at boot. USB readers
+> stay root-only, so the plugin can't open them. Workaround until Kiln
+> offers a boot hook: after each reboot, run `sh /data/ad5x/nfc-hook.sh`
+> as root. A proper hook was requested in
+> [djvalic/kiln-os#13](https://github.com/djvalic/kiln-os/issues/13).
+
 ```
 NFC tag ──► decode (Bambu, Creality, Snapmaker, OpenSpool, OpenPrintTag, ...)
 QR label ─► camera ──► decode (Spoolman label, OpenSpool JSON, text)
