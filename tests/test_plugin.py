@@ -426,6 +426,41 @@ class PluginTest(unittest.TestCase):
         self.assertIsNone(scan.spool)
         self.assertIn("2 spools match", scan.spoolman_note)
 
+    def test_native_spoolman_tag_matches(self):
+        from kilnnfc.spoolman import spool_uids
+        spool = {"id": 76, "extra": {}, "tags": [{"uid": "531c89bc520001", "added": "2026-10-27T20:45:35Z"}]}
+        self.assertEqual(spool_uids(spool), ["531C89BC520001"])
+
+    def test_bind_links_native_tag_and_card_uids(self):
+        from kilnnfc.spoolman import Spoolman, SpoolmanError
+        calls = []
+
+        class Fake(Spoolman):
+            def __init__(self, refuse_link=False):
+                self.refuse_link = refuse_link
+
+            def request(self, method, path, query=None, body=None):
+                calls.append((method, path, body))
+                if path.endswith("/tag") and self.refuse_link:
+                    raise SpoolmanError("Spoolman: tag already linked to spool 3")
+                if path == "/v1/field/spool":
+                    return [{"key": "card_uids"}]
+                if method == "GET":
+                    return []
+                return {}
+
+        Fake().bind_uid({"id": 76, "extra": {}, "tags": []}, "53:1c:89:bc:52:00:01")
+        self.assertIn(("POST", "/v1/spool/76/tag", {"uid": "531C89BC520001"}), calls)
+        self.assertIn(("PATCH", "/v1/spool/76", {"extra": {"card_uids": '"531C89BC520001"'}}), calls)
+        # Spoolman before 0.27: no tag list, no link attempt.
+        del calls[:]
+        Fake().bind_uid({"id": 5, "extra": {}}, "04AA")
+        self.assertFalse([c for c in calls if c[1].endswith("/tag")])
+        # A tag held elsewhere: Card UIDs still written.
+        del calls[:]
+        Fake(refuse_link=True).bind_uid({"id": 76, "extra": {}, "tags": []}, "04AA")
+        self.assertIn(("PATCH", "/v1/spool/76", {"extra": {"card_uids": '"04AA"'}}), calls)
+
     def test_spool_title_drops_repeated_words(self):
         from kilnnfc.spoolman import spool_title
         spool = {"id": 15, "filament": {"vendor": {"name": "Snapmaker"}, "material": "PLA",

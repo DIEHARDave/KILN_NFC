@@ -1,11 +1,13 @@
 """Spoolman through Moonraker's [spoolman] proxy, so Spoolman's address is
 configured once, in Moonraker. Blocking calls; run them off the reactor.
 
-Tags are matched to spools by UID in the spool's "card_uids" extra field
-(comma-separated hex, the convention zmod_afclite and the Snapmaker U1
-SpoolLink apps use) or nfc2klipper's "nfc_id" field."""
+Tags are matched to spools by UID in Spoolman's own tag list (0.27 and
+later), the spool's "card_uids" extra field (comma-separated hex, the
+convention zmod_afclite and the Snapmaker U1 SpoolLink apps use) or
+nfc2klipper's "nfc_id" field."""
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +21,7 @@ CARD_UIDS_FIELD_DEFINITION = {
     "default_value": json.dumps(""),
 }
 TIMEOUT = 30.0
+LOGGER = logging.getLogger("kiln_nfc")
 
 DENSITY = {
     "PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21,
@@ -54,6 +57,7 @@ def _extra_text(spool, field):
 def spool_uids(spool):
     uids = [normalize_uid(u) for u in _extra_text(spool, CARD_UIDS_FIELD).split(",")]
     uids.append(normalize_uid(_extra_text(spool, NFC_ID_FIELD)))
+    uids += [normalize_uid(t.get("uid") or "") for t in spool.get("tags") or [] if isinstance(t, dict)]
     return [u for u in uids if u]
 
 
@@ -151,11 +155,24 @@ class Spoolman(object):
             self.request("POST", "/v1/field/spool/" + CARD_UIDS_FIELD,
                          body=CARD_UIDS_FIELD_DEFINITION)
 
+    def link_tag(self, spool, uid):
+        """Link uid in Spoolman's own tag list, where Spoolman has one (its
+        spools then carry "tags"). A tag held by another spool or filament
+        is left there."""
+        if "tags" not in spool:
+            return
+        try:
+            self.request("POST", "/v1/spool/%d/tag" % spool["id"], body={"uid": uid})
+        except SpoolmanError as exc:
+            LOGGER.info("kiln_nfc: tag %s not linked to spool %s: %s", uid, spool["id"], exc)
+
     def bind_uid(self, spool, uid):
-        """Add uid to the spool's card_uids, removing it from other spools."""
+        """Add uid to the spool's card_uids, removing it from other spools,
+        and to Spoolman's own tag list."""
         uid = normalize_uid(uid)
         if not uid or uid in spool_uids(spool):
             return spool
+        self.link_tag(spool, uid)
         self.ensure_card_field()
         for other in self.request("GET", "/v1/spool", {"allow_archived": "true"}) or []:
             if other.get("id") != spool["id"] and uid in spool_uids(other):
