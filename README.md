@@ -1,5 +1,12 @@
 # KILN_NFC
 
+> **Moved to [FF_NFC](https://github.com/DIEHARDave/FF_NFC).** KILN_NFC is
+> now FF_NFC: one plugin for Kiln OS and Zmod, with the same readers, tag
+> formats, Spoolman handling and `NFC_*` commands. This repository is
+> archived and gets no more updates. To move a printer over (FF_NFC's
+> `install.sh` also removes KILN_NFC's root hook), see
+> [Moving from zmod_nfc or KILN_NFC](https://github.com/DIEHARDave/FF_NFC#moving-from-zmod_nfc-or-kiln_nfc).
+
 A [Kiln OS](https://github.com/djvalic/kiln-os) plugin for the
 **Flashforge AD5X** that reads **NFC/RFID filament tags**. Hold a tagged
 spool to a reader, pick the IFS slot it goes in (or just insert the
